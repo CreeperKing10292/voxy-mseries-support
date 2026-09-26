@@ -49,7 +49,7 @@ public final class VxContractInjector {
     private static int uProjInv, uLightVec, uMaskAuto, uMaskScale, uDepthIsWindow;
     private static int uProj, uLongShadows, uShadowDim, uShadowSteps;
     private static int uSeafloorDimLoc, uTransDepthTexLoc, uSeafloorAttenLoc, uSeafloorFloorLoc, uUpViewLoc, uSeafloorDebugLoc, uSeafloorMaxDistLoc;
-    private static int uAbyssLoc, uAbyssColorLoc, uSeaOffsetLoc;
+    private static int uAbyssLoc, uAbyssColorLoc, uSeaOffsetLoc, uAbyssDtGateLoc;
     private static int colorFbo;
     private static int[] attachedTargets = new int[0];
     private static boolean warnedFailure;
@@ -205,6 +205,15 @@ public final class VxContractInjector {
      *  VOXY_VX_SEAFLOOR_MAX_DIST: unset/-1 = auto (the ring), 0 = unlimited
      *  (the old behaviour), >0 = explicit blocks. */
     private static final float VX_SEAFLOOR_MAX_DIST = parseEnvF("VOXY_VX_SEAFLOOR_MAX_DIST", -1f);
+    /** 2026-07-15 border-band fix: mirrors MDICSectionRenderer's FULLRING mode
+     *  (masked near-cull radius extended from rdBlocks-16 to the full vanilla
+     *  border) so the auto seafloor-dim ring tracks the same radius. Same env
+     *  pair as MDIC/MetalVxResolvePass — the three rings move together.
+     *  2026-07-16 round-14 FALSIFIED as the pane fix — now opt-in via
+     *  VOXY_TRANS_NEAR_CULL_FULLRING=1 (all three rings together). */
+    private static final boolean SF_FULLRING =
+            !"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_MASKED"))
+            && "1".equals(System.getenv("VOXY_TRANS_NEAR_CULL_FULLRING"));
     /** Diagnostic (VOXY_BOUND_DEBUG house style): paint every pixel the
      *  seafloor dim actually touches red, so "dim engaged but insufficient"
      *  and "dim never engages" are distinguishable on a screenshot. */
@@ -244,6 +253,21 @@ public final class VxContractInjector {
      *  the panes" vs "fill never engages" is unmistakable on a screenshot. */
     private static final boolean VX_ABYSS_DEBUG = "1".equals(System.getenv("VOXY_VX_ABYSS_DEBUG"));
     private static final float[] VX_ABYSS_RGB = parseEnvRgb("VOXY_VX_ABYSS_RGB", 0.010f, 0.024f, 0.032f);
+    /** 2026-07-16 round-14 pane fix: the abyss pair's down-angle gate (-0.05,
+     *  ~2.9 deg below horizontal) refused exactly the grazing rays where the
+     *  panes live — from a vantage H blocks above the sea every pixel beyond
+     *  ~20xH fails it, nothing covers the missing LOD floor there, the pack
+     *  composites raw sky/clouds and BSL's water blends over that bright
+     *  backdrop = the flat pale pitch-up quads over mid-distance vanilla
+     *  water (probe-verified: no resolve/abyss/opaque tint ever touched
+     *  them). Where the ghost dT is valid we KNOW LOD water is at that pixel,
+     *  so the dT branch only needs the ray to point below the horizontal
+     *  (-0.001); the analytic sea-plane branch keeps -0.05 (a ray-plane
+     *  intersection genuinely needs a downward ray). The SAME value feeds
+     *  both shaders of the bit-identical colour/depth pair.
+     *  VOXY_VX_ABYSS_GRAZE=0 reverts to the -0.05 gate on both branches. */
+    private static final boolean VX_ABYSS_GRAZE = !"0".equals(System.getenv("VOXY_VX_ABYSS_GRAZE"));
+    private static final float VX_ABYSS_DT_GATE = VX_ABYSS_GRAZE ? -0.001f : -0.05f;
     private static boolean abyssLoggedFirst;
 
     private static float[] parseEnvRgb(String name, float r, float g, float b) {
@@ -521,14 +545,17 @@ public final class VxContractInjector {
                         + (VX_SEAFLOOR_DEBUG ? " DEBUG-TINT ON (dimmed pixels red)" : ""));
             }
             // Auto radius mirrors MDICSectionRenderer's near-cull ring
-            // (max(rdBlocks,32)-16, floor 64): the only zone where real
-            // MC/BSL water overlays the injected LOD floor. Recomputed per
-            // frame — render distance is live-editable in video settings.
+            // (FULLRING: max(rdBlocks,32), legacy: -16; floor 64): the only
+            // zone where real MC/BSL water overlays the injected LOD floor.
+            // FULLRING (2026-07-15 border-band fix) extends the masked cull to
+            // the full vanilla border, so real water reaches rdBlocks and the
+            // seafloor dim must too. Recomputed per frame — render distance is
+            // live-editable in video settings.
             float sfMaxDist = VX_SEAFLOOR_MAX_DIST;
             if (sfMaxDist < 0f) {
                 float rdBlocks = Math.max(net.minecraft.client.Minecraft.getInstance()
                         .gameRenderer.getRenderDistance(), 32f);
-                sfMaxDist = Math.max(rdBlocks - 16f, 64f);
+                sfMaxDist = SF_FULLRING ? Math.max(rdBlocks, 64f) : Math.max(rdBlocks - 16f, 64f);
             }
             if (seafloorDim && !sfLoggedEngaged) {
                 sfLoggedEngaged = true;
@@ -536,7 +563,8 @@ public final class VxContractInjector {
                         + "red tint " + (VX_SEAFLOOR_DEBUG ? "ON" : "off")
                         + "; maxDist=" + (sfMaxDist > 0f ? sfMaxDist + " blocks" : "unlimited") + ")");
             }
-            glUniform1i(uSeafloorDimLoc, seafloorDim ? 1 : 0);
+            glUniform1i(uSeafloorDimLoc, (seafloorDim
+                    && !me.cortex.voxy.client.core.VoxyRenderSystem.FOV_HOLD_ACTIVE) ? 1 : 0);
             glUniform1i(uTransDepthTexLoc, 2);
             glUniform1f(uSeafloorAttenLoc, VX_SEAFLOOR_DIM_ATTEN);
             glUniform1f(uSeafloorFloorLoc, VX_SEAFLOOR_DIM_FLOOR);
@@ -553,6 +581,16 @@ public final class VxContractInjector {
             // water sections haven't uploaded yet; >-0.5 (camera at/under
             // sea level) disables that branch in both shaders.
             float seaOffset = 1.0f;
+            // Round-27 FOV-stability latch: during scope transitions the zoom
+            // compensation re-selects finer, not-yet-built LOD levels and the
+            // mid-distance opaque LOD floor goes missing for the build
+            // round-trip — the abyss fill then paints its dark seabed in
+            // section footprints (the held-spyglass dark panes). Pause the
+            // fill (and the seafloor dim below, which shares the trigger) for
+            // FOV-unstable frames; fail-open. VOXY_VX_FOV_HOLD=0 reverts.
+            if (me.cortex.voxy.client.core.VoxyRenderSystem.FOV_HOLD_ACTIVE) {
+                abyss = false;
+            }
             if (abyss && up != null) {
                 boolean abyssDepthOk;
                 try {
@@ -566,7 +604,7 @@ public final class VxContractInjector {
                             me.cortex.voxy.client.core.rendering.util.MetalMvpUtil.METAL_NDC_REMAP,
                             new org.joml.Matrix4f(viewport.projection),
                             new org.joml.Matrix4f(viewport.projection).invert(),
-                            up, sfMaxDist, VX_ABYSS_PUSH, seaOffset);
+                            up, sfMaxDist, VX_ABYSS_PUSH, seaOffset, VX_ABYSS_DT_GATE);
                 } catch (Throwable t) {
                     abyssDepthOk = false;
                 }
@@ -576,6 +614,7 @@ public final class VxContractInjector {
             }
             glUniform1f(uSeaOffsetLoc, seaOffset);
             glUniform1i(uAbyssLoc, abyss ? 1 : 0);
+            glUniform1f(uAbyssDtGateLoc, VX_ABYSS_DT_GATE);
             if (VX_ABYSS_DEBUG) {
                 glUniform3f(uAbyssColorLoc, 0.0f, 1.0f, 0.0f);
             } else {
@@ -591,6 +630,13 @@ public final class VxContractInjector {
                         + " push=" + VX_ABYSS_PUSH + " blocks, rgb=" + VX_ABYSS_RGB[0] + ","
                         + VX_ABYSS_RGB[1] + "," + VX_ABYSS_RGB[2]
                         + (VX_ABYSS_DEBUG ? ", DEBUG-TINT GREEN" : "")
+                        + "; graze arm " + (VX_ABYSS_GRAZE
+                                ? "ON: dT-branch down-angle gate -0.001 (the legacy -0.05"
+                                + " refused rays flatter than ~2.9deg, leaving ghost-dT pixels"
+                                + " beyond ~20x camera height uncovered = the pitch-up pale"
+                                + " panes over mid-distance vanilla water;"
+                                + " VOXY_VX_ABYSS_GRAZE=0 reverts)"
+                                : "OFF (VOXY_VX_ABYSS_GRAZE=0, legacy -0.05 both branches)")
                         + "; VOXY_VX_ABYSS_FILL=0 reverts, _PUSH/_RGB tune)"
                         : "OFF (VOXY_VX_ABYSS_FILL=0)"));
             }
@@ -997,6 +1043,7 @@ public final class VxContractInjector {
                 uniform int uAbyss;
                 uniform vec3 uAbyssColor;
                 uniform float uSeaOffset;
+                uniform float uDtGate;
                 in vec2 vUV;
                 out vec4 outColor0;
                 out vec4 outColor1;
@@ -1021,6 +1068,7 @@ public final class VxContractInjector {
                         if (uAbyss == 1) {
                             vec3 abP = vec3(0.0);
                             bool abHave = false;
+                            bool abViaDT = false;
                             vec3 abEnc = texture(uTransDepthTex, texel).rgb;
                             float abDT = dot(abEnc, vec3(1.0, 1.0 / 255.0, 1.0 / 65025.0));
                             if (abDT > 0.0 && abDT < 0.9999995) {
@@ -1028,6 +1076,7 @@ public final class VxContractInjector {
                                 vec4 abP4 = uProjInv * vec4(vUV * 2.0 - 1.0, abZ, 1.0);
                                 abP = abP4.xyz / abP4.w;
                                 abHave = true;
+                                abViaDT = true;
                             } else if (uSeaOffset < -0.5) {
                                 // Analytic sea-plane fallback — see the
                                 // abyssDepth shader; during early join churn
@@ -1043,7 +1092,11 @@ public final class VxContractInjector {
                             }
                             if (abHave) {
                                 float abLen = length(abP);
-                                if (abLen > 1e-3 && dot(abP / abLen, uUpView) < -0.05) {
+                                // Graze arm: a valid dT already proves LOD water
+                                // at this pixel, so it only needs to point below
+                                // the horizontal (uDtGate, default -0.001); the
+                                // sea-plane branch keeps the strict -0.05.
+                                if (abLen > 1e-3 && dot(abP / abLen, uUpView) < (abViaDT ? uDtGate : -0.05)) {
                                     float abHoriz = length(abP - uUpView * dot(abP, uUpView));
                                     if (uSeafloorMaxDist <= 0.0 || abHoriz < uSeafloorMaxDist) {
                                         // colortex6 seed: r=0 (a deep seabed
@@ -1391,6 +1444,7 @@ public final class VxContractInjector {
         uAbyssLoc = glGetUniformLocation(program, "uAbyss");
         uAbyssColorLoc = glGetUniformLocation(program, "uAbyssColor");
         uSeaOffsetLoc = glGetUniformLocation(program, "uSeaOffset");
+        uAbyssDtGateLoc = glGetUniformLocation(program, "uDtGate");
         Logger.info("[Metal-LODTEST] vx seafloor water-column dim "
                 + (VX_SEAFLOOR_DIM ? "ON" : "OFF")
                 + " (LOD floor under LOD water darkened by atten^blocks — the mip rep-voxel"

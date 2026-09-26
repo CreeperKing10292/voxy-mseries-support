@@ -384,7 +384,8 @@ public class HierarchicalOcclusionTraverser {
                 // the full queue size for the scoped duration so the refine
                 // lands fast. Self-limiting once the children are resident
                 // (markRequested dedup + hasChildren stop the demand).
-                if (ZOOM_REQ_BOOST_ENABLED && viewport.zoomCompensation > 1.0f) {
+                if (ZOOM_REQ_BOOST_ENABLED && viewport.zoomCompensation > 1.0f
+                        && !me.cortex.voxy.client.core.VoxyRenderSystem.FOV_HOLD_ACTIVE) {
                     requestSize = MAX_REQUEST_QUEUE_SIZE;
                 }
             }

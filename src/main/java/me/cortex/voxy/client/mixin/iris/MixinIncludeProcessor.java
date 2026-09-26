@@ -26,14 +26,25 @@ public class MixinIncludeProcessor {
     @Inject(method = "getIncludedFile", at = @At("RETURN"), cancellable = true)
     private void voxy$applyVxFogCap(AbsolutePackPath path,
                                     CallbackInfoReturnable<ImmutableList<String>> cir) {
-        if (!VoxyConfig.CONFIG.isRenderingEnabled() || !IrisUtil.SHADER_SUPPORT
-                || !VxFogCap.enabled()) {
+        if (!VoxyConfig.CONFIG.isRenderingEnabled() || !IrisUtil.SHADER_SUPPORT) {
             return;
         }
-        ImmutableList<String> patched = VxFogCap.patchDeferred(cir.getReturnValue(),
-                String.valueOf(path));
-        if (patched != null) {
-            cir.setReturnValue(patched);
+        if (VxFogCap.enabled()) {
+            ImmutableList<String> patched = VxFogCap.patchDeferred(cir.getReturnValue(),
+                    String.valueOf(path));
+            if (patched != null) {
+                cir.setReturnValue(patched);
+            }
+        }
+        // 2026-07-16 round-16 pane fix (see VxSsrMaskFix): reflectionMask +
+        // raytrace vx-substitute guard. Independent line targets — safe to
+        // stack after the fog cap on the same source.
+        if (me.cortex.voxy.client.iris.VxSsrMaskFix.enabled()) {
+            ImmutableList<String> fixed = me.cortex.voxy.client.iris.VxSsrMaskFix.patch(
+                    cir.getReturnValue(), String.valueOf(path));
+            if (fixed != null) {
+                cir.setReturnValue(fixed);
+            }
         }
     }
 }

@@ -367,11 +367,21 @@ public final class MetalVxResolvePass {
                 float dim2 = dim * dim; // env value = PERCEIVED (pack sqrt-encodes after)
                 float aTgt = Math.min(WATER_RING_ALPHA, 0.98f);
                 float ramp = Math.min(Math.max(WATER_RING_RAMP, 0.5f), 0.999f);
-                StringBuilder inj = new StringBuilder();
+                // Ring fade shared by the parity and the grazing mirror dim so the
+                // two release at exactly the same distance. HOLD (default) keeps
+                // full strength to the cull radius and releases across the belt
+                // BEYOND it (border-band fix — the old inside fade zeroed the dims
+                // exactly over the border overlap ring where the panes live);
+                // VOXY_VX_RING_HOLD=0 reverts to the inside 0.95*cull..cull fade.
                 // Locale.ROOT: a comma decimal separator would emit broken GLSL.
-                inj.append(String.format(java.util.Locale.ROOT,
-                        "if (water > 0.5) { float vxRingT = 1.0 - smoothstep(uVxRingCull * %.3f, uVxRingCull, %s); ",
-                        ramp, metric));
+                String ringFade = RING_HOLD
+                        ? String.format(java.util.Locale.ROOT,
+                                "smoothstep(uVxRingCull, uVxRingCull + %.1f, %s)",
+                                Math.max(RING_RELEASE, 1f), metric)
+                        : String.format(java.util.Locale.ROOT,
+                                "smoothstep(uVxRingCull * %.3f, uVxRingCull, %s)", ramp, metric);
+                StringBuilder inj = new StringBuilder();
+                inj.append("if (water > 0.5) { float vxRingT = 1.0 - ").append(ringFade).append("; ");
                 if (dim < 1.0f) {
                     String dimExpr = String.format(java.util.Locale.ROOT, "%.4f", dim2);
                     if (WATER_RING_FRESNEL) {
@@ -398,13 +408,52 @@ public final class MetalVxResolvePass {
                 patchText = patchText.replace(parityNeedle, inj + parityNeedle);
                 Logger.info(String.format(java.util.Locale.ROOT,
                         "[Metal-LODTEST] vx water ring parity ON (water dim %.2f perceived -> *= %.4f"
-                        + " linear%s, alpha lift -> max(a, %.2f), metric %s, ramp %.2f*cull..cull,"
+                        + " linear%s, alpha lift -> max(a, %.2f), metric %s, fade %s,"
                         + " cull = LIVE uVxRingCull per frame — RD changes retune without reload);"
                         + " VOXY_VX_WATER_RING_PARITY=0 kills (mirror dim resumes);"
                         + " _DIM/_ALPHA/_RAMP tune — if in-ring water reads TOO DARK at grazing/sunset"
                         + " RAISE _DIM toward 1.0; _DEBUG=1 magenta-tints engagement",
                         dim, dim2, WATER_RING_FRESNEL ? " with fresnel release" : "",
-                        aTgt, metric, ramp));
+                        aTgt, metric,
+                        RING_HOLD
+                            ? String.format(java.util.Locale.ROOT,
+                                "HOLD to cull, release cull..cull+%.0f blocks (VOXY_VX_RING_HOLD=0 reverts)",
+                                Math.max(RING_RELEASE, 1f))
+                            : String.format(java.util.Locale.ROOT, "%.2f*cull..cull inside", ramp)));
+
+                // Grazing arm (see RING_MIRROR_DIM): the parity above dims albedo
+                // AFTER the pack's fresnel mix, so at grazing the pixel is still
+                // ~100% undimmed skyReflection. Re-dim skyReflection at the old
+                // mirror-dim anchor, gated on the same live uVxRingCull + metric.
+                if (RING_MIRROR_DIM < 1.0f) {
+                    String mirrorNeedle = "reflection.rgb = max(mix(skyReflection, reflection.rgb, reflection.a), vec3(0.0));";
+                    if (patchText.contains(mirrorNeedle)) {
+                        float mDim = Math.min(Math.max(RING_MIRROR_DIM, 0.05f), 1.0f);
+                        float mDim2 = mDim * mDim; // env value = PERCEIVED (sqrt encode guaranteed by parityInjectable)
+                        // Locale.ROOT: a comma decimal separator would emit broken GLSL.
+                        patchText = patchText.replace(mirrorNeedle, String.format(java.util.Locale.ROOT,
+                                "skyReflection *= mix(%.4f, 1.0, %s); ",
+                                mDim2, ringFade) + mirrorNeedle);
+                        Logger.info(String.format(java.util.Locale.ROOT,
+                                "[Metal-LODTEST] vx ring grazing mirror dim ON (skyReflection *= %.4f"
+                                + " linear = %.2f perceived in-ring, ~%.2f combined with the parity dim"
+                                + " at grazing; metric %s, live uVxRingCull — RD changes retune without"
+                                + " reload); VOXY_VX_RING_MIRROR_DIM=1 disables"
+                                + " (VOXY_VX_NEAR_MIRROR_DIM stays subsumed by the parity)",
+                                mDim2, mDim, mDim * (dim < 1.0f ? dim : 1.0f), metric));
+                        if (WATER_RING_FRESNEL) {
+                            Logger.warn("[Metal-LODTEST] vx ring: VOXY_VX_WATER_RING_FRESNEL=1 releases"
+                                    + " the parity dim at grazing while the grazing mirror dim re-dims"
+                                    + " skyReflection there — the two fight; set"
+                                    + " VOXY_VX_RING_MIRROR_DIM=1 to keep the bright grazing mirror");
+                        }
+                    } else {
+                        Logger.warn("[Metal-LODTEST] vx ring grazing mirror dim FAILED (reflection-mix"
+                                + " anchor not found — pack text drifted, or REFLECTION=0 pre-expanded"
+                                + " the block away, where no sky mirror exists anyway);"
+                                + " VOXY_VX_RING_MIRROR_DIM inert");
+                    }
+                }
             }
 
             // vx fog cap, LOD-water half (see VxFogCap for the deferred1/opaque
@@ -828,18 +877,63 @@ public final class MetalVxResolvePass {
     // Optional: release the rgb dim as fresnel rises (full strength top-down where
     // the bug lives; restores the bright mirror at grazing). Default OFF.
     private static final boolean WATER_RING_FRESNEL = "1".equals(System.getenv("VOXY_VX_WATER_RING_FRESNEL"));
+    // Grazing arm of the ring parity (VOXY_VX_RING_MIRROR_DIM, >=1 disables just
+    // this arm; the assembled text is then byte-identical to the parity-only
+    // build). The parity's whole-pixel dim lands AFTER the pack's fresnel mix,
+    // so at grazing (fresnel -> 1) a kept-fallback quad is ~100% undimmed
+    // skyReflection — the pale panes the mirror dim (5bab4da4) fixed and the
+    // parity (cac60d5a) un-fixed by subsuming that dim. This re-dims
+    // skyReflection at the old anchor but on the parity's LIVE ring gate and
+    // metric (no slant aerial release, no baked-radius staleness — the two
+    // defects that got the old dim replaced). PERCEIVED value, injected SQUARED;
+    // valid by construction because the parity anchor IS the ALPHA_BLEND==0
+    // sqrt-encode line. 0.60 x the parity's 0.75 whole-pixel dim = the old
+    // user-verified 0.45 combined at grazing.
+    // 2026-07-16 round-14 FALSIFIED as the pane fix: the tinted probe run showed
+    // the panes never enter the resolve water branch (untinted), so this dim
+    // cannot touch them. Default 1.0 = arm off / byte-identical text; the env
+    // re-enables it for A/B only.
+    private static final float RING_MIRROR_DIM = parseEnvFloat("VOXY_VX_RING_MIRROR_DIM", 1.0f);
     // Magenta engagement tint (VOXY_VX_SEAFLOOR_DEBUG house style): one user run
     // distinguishes "never engages" from "engages but insufficient".
     private static final boolean WATER_RING_DEBUG = "1".equals(System.getenv("VOXY_VX_WATER_RING_DEBUG"));
     // Ring margin parsed once (env is process-constant); RD is read per frame.
     private static final float RING_MARGIN = parseEnvFloat("VOXY_TRANS_NEAR_CULL_MARGIN",
             !"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_XZ")) ? 16f : 48f);
+    // 2026-07-15 border-band panes: mirrors MDICSectionRenderer's FULLRING mode
+    // (masked cull radius extended to the full vanilla border so the mask gate
+    // is reachable in the border overlap ring). Same env pair so the cull and
+    // every ring-gated dim move together.
+    // 2026-07-16 round-14 FALSIFIED as the pane fix (panes persisted with it
+    // live and untinted in the probe run) — now opt-in via
+    // VOXY_TRANS_NEAR_CULL_FULLRING=1, default back to the -margin radius.
+    private static final boolean RING_FULLRING =
+            !"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_MASKED"))
+            && "1".equals(System.getenv("VOXY_TRANS_NEAR_CULL_FULLRING"));
+    // Hold the ring dims (parity + grazing mirror dim) at FULL strength all the
+    // way to the cull radius and release them across the RELEASE blocks BEYOND
+    // it, instead of fading them out across the last 5% INSIDE the ring. The
+    // old inside-fade released the dims exactly over the border band where the
+    // kept-fallback panes live (the 0.95*cull..cull band); the release belt
+    // beyond the border is pure-LOD territory, so the fallback tone graduates
+    // into the pack's bright far-water convention where there is no vanilla
+    // water left to mismatch. VOXY_VX_RING_RELEASE tunes the belt width in blocks.
+    // 2026-07-16 round-14 FALSIFIED as the pane fix, and the release belt dimmed
+    // the first 48 blocks of continuous LOD water BEYOND the border — the
+    // user-reported "shaded band that interrupts the water" seam at the
+    // vanilla/LOD boundary. Now opt-in via VOXY_VX_RING_HOLD=1; default back to
+    // the inside 0.95*cull..cull fade (no dim outside the ring).
+    private static final boolean RING_HOLD = "1".equals(System.getenv("VOXY_VX_RING_HOLD"));
+    private static final float RING_RELEASE = parseEnvFloat("VOXY_VX_RING_RELEASE", 48f);
 
     /** LIVE near-cull ring radius; mirrors MDICSectionRenderer's voxyLodParams2.x
-     *  (max(max(rd,32) - margin, 64) = 496 at RD 32) so a mid-session render-
-     *  distance change retunes the parity ramp the same frame — the mirror dim's
-     *  documented baked-radius staleness defect does not recur here. Any future
-     *  change to MDIC's formula must be mirrored here (intentionally identical). */
+     *  (FULLRING: max(max(rd,32), 64) = 512 at RD 32; legacy: -margin = 496) so a
+     *  mid-session render-distance change retunes the parity ramp the same frame
+     *  — the mirror dim's documented baked-radius staleness defect does not recur
+     *  here. Any future change to MDIC's formula must be mirrored here
+     *  (intentionally identical). Consumers: parity/grazing-dim ring gates and
+     *  the LOD-water fog cap (cap = uVxRingCull + margin ~= the vanilla far
+     *  plane; FULLRING overshoots it by the margin — negligible for a fog clamp). */
     private static float ringCullNow() {
         float rdBlocks;
         try {
@@ -848,7 +942,7 @@ public final class MetalVxResolvePass {
         } catch (Throwable t) {
             rdBlocks = 192f;
         }
-        return Math.max(rdBlocks - RING_MARGIN, 64f);
+        return RING_FULLRING ? Math.max(rdBlocks, 64f) : Math.max(rdBlocks - RING_MARGIN, 64f);
     }
 
     private static float parseEnvFloat(String name, float def) {

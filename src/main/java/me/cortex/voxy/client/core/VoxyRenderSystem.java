@@ -306,6 +306,15 @@ public class VoxyRenderSystem {
             (float) Math.pow(4.0, ZOOM_REFINE_LEVELS);
     private static boolean zoomCompEngaged;
 
+    /** Round-27 FOV-stability latch (see setupViewport): true while the frame's
+     *  projection is FOV-unstable (scope lerp) or zoom compensation is engaged.
+     *  Consumers pause hole-filling work for these frames. Volatile: read from
+     *  the render thread only, but keep publication safe for diagnostics. */
+    public static volatile boolean FOV_HOLD_ACTIVE;
+    private static final boolean FOV_HOLD_ENABLED =
+            !"0".equals(System.getenv("VOXY_VX_FOV_HOLD"));
+    private static float lastFrameM00;
+
     private static int parseZoomRefineLevels() {
         String v = System.getenv("VOXY_LOD_ZOOM_REFINE_LEVELS");
         if (v == null || v.isBlank()) return 2;
@@ -512,6 +521,39 @@ public class VoxyRenderSystem {
                             + "-level refine budget; effComp=1)");
                 }
             }
+        }
+
+        // 2026-07-17 round-27 FOV-stability latch (VOXY_VX_FOV_HOLD=0 reverts)
+        // + [Metal-FRUSTUM-DELTA] probe. Root chain (bytecode-verified trace):
+        // a spyglass scope (or any FOV transition — the 0.5/tick fovModifier
+        // lerp) engages the zoom compensation, HOT re-selects finer LOD levels
+        // whose sections are NOT yet built, the mid-distance opaque LOD floor
+        // goes missing for the build round-trip, and missing-opaque +
+        // present-trans-depth is exactly the abyss-fill trigger — its synthetic
+        // dark seabed (or, with the fill off, the raw hole) paints the dark
+        // section-shaped panes over mid-distance ocean until the zoom settles.
+        // The latch marks the frame FOV-unstable while m00 moves >1%/frame or
+        // the compensation is engaged; consumers (abyss fill + seafloor dim in
+        // VxContractInjector, the HOT request boost) pause for those frames —
+        // fail-open, render MVP untouched (the scope still draws zoomed).
+        {
+            float m00Now = projection.m00();
+            boolean unstable = false;
+            if (lastFrameM00 != 0.0f && m00Now != 0.0f) {
+                float rel = Math.abs(m00Now - lastFrameM00) / Math.abs(lastFrameM00);
+                unstable = rel > 0.01f;
+            }
+            boolean hold = FOV_HOLD_ENABLED
+                    && (unstable || viewport.zoomCompensation > 1.0f);
+            if (hold != FOV_HOLD_ACTIVE) {
+                Logger.info("[Metal-FRUSTUM-DELTA] fov " + (hold ? "UNSTABLE" : "stable")
+                        + " (m00 " + lastFrameM00 + " -> " + m00Now
+                        + ", zoomComp=" + viewport.zoomCompensation + ")"
+                        + (hold ? " — abyss fill / seafloor dim / request boost PAUSED"
+                                + " (VOXY_VX_FOV_HOLD=0 reverts)" : ""));
+            }
+            FOV_HOLD_ACTIVE = hold;
+            lastFrameM00 = m00Now;
         }
 
         viewport

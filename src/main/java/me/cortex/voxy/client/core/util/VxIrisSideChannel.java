@@ -68,7 +68,7 @@ public final class VxIrisSideChannel {
     // Abyss-fill depth pass (0 = unbuilt, -1 = build failed once, stay off).
     private int abyssProgram;
     private int aUColour, aUDepth, aUTransDepth, aUDepthIsWindow;
-    private int aUProj, aUProjInv, aUUpView, aUMaxDist, aUPush, aUSeaOffset;
+    private int aUProj, aUProjInv, aUUpView, aUMaxDist, aUPush, aUSeaOffset, aUDtGate;
     private int width, height;
     private boolean broken;
 
@@ -278,7 +278,7 @@ public final class VxIrisSideChannel {
                               int fbw, int fbh, boolean depthIsWindow,
                               org.joml.Matrix4f proj, org.joml.Matrix4f projInv,
                               org.joml.Vector3f upView, float maxDist, float push,
-                              float seaOffset) {
+                              float seaOffset, float dtGate) {
         if (this.broken || this.fboOpaque == 0 || transDepthRectTex == 0 || this.vao == 0) {
             return false;
         }
@@ -341,6 +341,7 @@ public final class VxIrisSideChannel {
             glUniform1f(this.aUMaxDist, maxDist);
             glUniform1f(this.aUPush, push);
             glUniform1f(this.aUSeaOffset, seaOffset);
+            glUniform1f(this.aUDtGate, dtGate);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             return true;
         } finally {
@@ -387,6 +388,7 @@ public final class VxIrisSideChannel {
                 uniform float uMaxDist;
                 uniform float uPush;
                 uniform float uSeaOffset;
+                uniform float uDtGate;
                 in vec2 vUV;
                 void main() {
                     ivec2 sz = textureSize(uDepth);
@@ -400,6 +402,7 @@ public final class VxIrisSideChannel {
                     if (!(a <= 0.001 || d <= 0.0 || d >= 0.9999999)) discard;
                     vec3 pT = vec3(0.0);
                     bool have = false;
+                    bool viaDT = false;
                     vec3 tEnc = texture(uTransDepth, texel).rgb;
                     float dT = dot(tEnc, vec3(1.0, 1.0 / 255.0, 1.0 / 65025.0));
                     if (dT > 0.0 && dT < 0.9999995) {
@@ -410,6 +413,7 @@ public final class VxIrisSideChannel {
                         vec4 pT4 = uProjInv * vec4(vUV * 2.0 - 1.0, zT, 1.0);
                         pT = pT4.xyz / pT4.w;
                         have = true;
+                        viaDT = true;
                     } else if (uSeaOffset < -0.5) {
                         // Analytic sea-plane fallback: during the first
                         // seconds of join churn even the LOD WATER sections
@@ -431,7 +435,11 @@ public final class VxIrisSideChannel {
                     float len = length(pT);
                     // Downward rays only, inside the trans near-cull ring
                     // (beyond it the LOD water + analytic mirror own the look).
-                    if (len <= 1e-3 || dot(pT / len, uUpView) >= -0.05) discard;
+                    // Graze arm (mirrors VxContractInjector's colour branch
+                    // EXACTLY): a valid dT proves LOD water at this pixel, so
+                    // it only needs to point below the horizontal (uDtGate,
+                    // default -0.001); the sea-plane branch keeps -0.05.
+                    if (len <= 1e-3 || dot(pT / len, uUpView) >= (viaDT ? uDtGate : -0.05)) discard;
                     float horiz = length(pT - uUpView * dot(pT, uUpView));
                     if (uMaxDist > 0.0 && horiz >= uMaxDist) discard;
                     vec3 pF = pT * ((len + uPush) / len);
@@ -456,6 +464,7 @@ public final class VxIrisSideChannel {
         this.aUMaxDist = glGetUniformLocation(prog, "uMaxDist");
         this.aUPush = glGetUniformLocation(prog, "uPush");
         this.aUSeaOffset = glGetUniformLocation(prog, "uSeaOffset");
+        this.aUDtGate = glGetUniformLocation(prog, "uDtGate");
         return true;
     }
 

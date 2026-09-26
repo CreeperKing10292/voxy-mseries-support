@@ -245,6 +245,24 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             TRANS_NEAR_CULL_XZ && !"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_RADIAL"));
     private static final float TRANS_NEAR_CULL_MARGIN =
             parseEnvFloat("VOXY_TRANS_NEAR_CULL_MARGIN", TRANS_NEAR_CULL_XZ ? 16f : 48f);
+    // 2026-07-15 border-band panes: the masked cull's radius gate stopped at
+    // rdBlocks - margin while Sodium renders real water out to ~rdBlocks, so
+    // in the margin-wide overlap ring at the vanilla border the mask test was
+    // structurally UNREACHABLE (nested inside the radius test) — LOD water
+    // there double-composited over real mid-distance water as undimmed pale
+    // panes, entering the frame only at near-horizon pitches. Round 5's
+    // comment assumed "handled by the chunk-bound mask"; in MASKED mode
+    // extend the radius to the full border so it actually can be — coverage
+    // still decides per pixel (built -> ghost-cull, unbuilt -> kept fallback).
+    // The unmasked legacy cull keeps the margin (no per-pixel safety net).
+    // 2026-07-16 round-14 FALSIFIED as the pane fix (panes persisted with the
+    // full ring live; the probe run showed they never enter the resolve water
+    // branch at all) — now opt-in via VOXY_TRANS_NEAR_CULL_FULLRING=1, default
+    // back to the -margin radius.
+    private static final boolean TRANS_NEAR_CULL_MASKED_ON =
+            !"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_MASKED"));
+    private static final boolean TRANS_NEAR_CULL_FULLRING = TRANS_NEAR_CULL_MASKED_ON
+            && "1".equals(System.getenv("VOXY_TRANS_NEAR_CULL_FULLRING"));
     private static boolean loggedNearCullRuntime;
 
     private static float parseEnvFloat(String name, float def) {
@@ -509,7 +527,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                     // LOD water survives over UNBUILT sections inside the ring
                     // (naked-seafloor "gray squares" fix — see quads.frag).
                     // VOXY_TRANS_NEAR_CULL_MASKED=0 restores the unconditional cull.
-                    if (!"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_MASKED"))) {
+                    if (TRANS_NEAR_CULL_MASKED_ON) {
                         translucentDefines.put("VOXY_TRANS_NEAR_CULL_MASKED", "");
                         Logger.info("[Metal-LODTEST] trans near-cull MASKED (cull only under built-"
                                 + "section coverage; LOD water kept over unbuilt sections); "
@@ -939,15 +957,23 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // see VOXY_TRANS_NEAR_CULL). GL and no-pack sessions read 0.
             float nearCull = 0.0f;
             if (me.cortex.voxy.client.core.util.IrisUtil.vxContractActive()) {
-                nearCull = Math.max(rdBlocks - TRANS_NEAR_CULL_MARGIN, 64f);
+                // FULLRING (masked mode): radius = the full vanilla border so the
+                // mask gate is reachable in the border overlap ring — see the
+                // TRANS_NEAR_CULL_FULLRING static. MetalVxResolvePass.ringCullNow()
+                // mirrors this formula (intentionally identical).
+                nearCull = TRANS_NEAR_CULL_FULLRING
+                        ? Math.max(rdBlocks, 64f)
+                        : Math.max(rdBlocks - TRANS_NEAR_CULL_MARGIN, 64f);
             }
             if (!loggedNearCullRuntime) {
                 loggedNearCullRuntime = true;
                 // One-shot: getRenderDistance() units (blocks vs chunks) decide
                 // whether the cull radius is ~RD or degenerate ~64.
                 Logger.info("[Metal-LODTEST] trans near-cull runtime: rdBlocks=" + rdBlocks
-                        + " cullDist=" + nearCull + " (vxContract="
-                        + me.cortex.voxy.client.core.util.IrisUtil.vxContractActive() + ")");
+                        + " cullDist=" + nearCull + " fullRing=" + TRANS_NEAR_CULL_FULLRING
+                        + " (vxContract="
+                        + me.cortex.voxy.client.core.util.IrisUtil.vxContractActive()
+                        + "); VOXY_TRANS_NEAR_CULL_FULLRING=0 reverts to the -margin radius");
             }
             MemoryUtil.memPutFloat(lodBase + 16, nearCull);
             MemoryUtil.memPutFloat(lodBase + 20, 0f);
