@@ -379,6 +379,26 @@ public final class VxContractInjector {
         boolean prevDepthTest = glIsEnabled(GL_DEPTH_TEST);
         boolean prevBlend = glIsEnabled(GL_BLEND);
         boolean prevScissor = glIsEnabled(GL_SCISSOR_TEST);
+        // GL_CULL_FACE: this pass disables it with a RAW glDisable (below) and,
+        // until 2026-09-25, never restored it. MC's GlStateManager tracks cull
+        // and skips glEnable when its shadow copy already says "enabled", so
+        // every tracked pipeline apply after this point (Sodium SOLID/CUTOUT/
+        // TRANSLUCENT via applyPipelineState, entity/hand pipelines) became a
+        // no-op and the whole frame rendered with back-face culling OFF —
+        // unless some NO_CULL pipeline (bare first-person arm =
+        // RenderTypes.entityTranslucent, entityCutoutNoCull mobs) flipped the
+        // tracker first and the next CULL pipeline re-issued glEnable. That is
+        // the held-item / empty-hand / F1 triad of the BSL water "cuadros":
+        // Sodium writes the water surface twice (POS_Y + the flipped NEG_Y
+        // shouldRenderBackwardUpFace quad); with cull off the DOWN-facing copy
+        // rasterises and BSL shades it flat (normalStrength -> 0, fresnel -> 1:
+        // sky mirror, no waves; NoL=0 dark when reflections are off).
+        boolean prevCull = glIsEnabled(GL_CULL_FACE);
+        if (!cullRestoreLogged) {
+            cullRestoreLogged = true;
+            Logger.info("[Metal-CULL] inject cull restore " + (GL_CULL_RESTORE ? "ON" : "OFF (VOXY_GL_CULL_RESTORE=0)")
+                    + " prevCull=" + prevCull);
+        }
         glActiveTexture(GL_TEXTURE1);
         int prevTexRect1 = glGetInteger(GL_TEXTURE_BINDING_RECTANGLE);
         int prevSampler1 = glGetInteger(org.lwjgl.opengl.GL33C.GL_SAMPLER_BINDING);
@@ -633,11 +653,21 @@ public final class VxContractInjector {
             if (prevDepthTest) glEnable(GL_DEPTH_TEST);
             if (prevBlend) glEnable(GL_BLEND);
             if (prevScissor) glEnable(GL_SCISSOR_TEST);
+            if (GL_CULL_RESTORE) {
+                // Raw restore keeps GL in step with GlStateManager's shadow copy
+                // (which this pass never touched). Kill switch reproduces the
+                // old leak for A/B: VOXY_GL_CULL_RESTORE=0.
+                if (prevCull) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+            }
             glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDrawFb);
             glBindFramebuffer(GL_READ_FRAMEBUFFER, prevReadFb);
         }
     }
+
+    /** Restore GL_CULL_FACE after the inject (see inject0). Default ON; =0 reverts to the leak. */
+    private static final boolean GL_CULL_RESTORE = !"0".equals(System.getenv("VOXY_GL_CULL_RESTORE"));
+    private static boolean cullRestoreLogged;
 
     /** Rejoin fix — see inject0. Attachment caches are only valid within ONE
      *  Iris pipeline generation; texture-name equality can't tell generations
