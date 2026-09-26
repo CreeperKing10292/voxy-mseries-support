@@ -245,6 +245,25 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             TRANS_NEAR_CULL_XZ && !"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_RADIAL"));
     private static final float TRANS_NEAR_CULL_MARGIN =
             parseEnvFloat("VOXY_TRANS_NEAR_CULL_MARGIN", TRANS_NEAR_CULL_XZ ? 16f : 48f);
+    // 2026-07-15 border-band panes: the masked cull's radius gate stopped at
+    // rdBlocks - margin while Sodium renders real water out to ~rdBlocks, so
+    // in the margin-wide overlap ring at the vanilla border the mask test was
+    // structurally UNREACHABLE (nested inside the radius test) — LOD water
+    // there double-composited over real mid-distance water as undimmed pale
+    // panes, entering the frame only at near-horizon pitches. Round 5's
+    // comment assumed "handled by the chunk-bound mask"; in MASKED mode
+    // extend the radius to the full border so it actually can be — coverage
+    // still decides per pixel (built -> ghost-cull, unbuilt -> kept fallback).
+    // The unmasked legacy cull keeps the margin (no per-pixel safety net).
+    // 2026-07-16 round-14 FALSIFIED as the pane fix (panes persisted with the
+    // full ring live; the probe run showed they never enter the resolve water
+    // branch at all) — now opt-in via VOXY_TRANS_NEAR_CULL_FULLRING=1, default
+    // back to the -margin radius.
+    private static final boolean TRANS_NEAR_CULL_MASKED_ON =
+            !"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_MASKED"));
+    private static final boolean TRANS_NEAR_CULL_FULLRING = TRANS_NEAR_CULL_MASKED_ON
+            && "1".equals(System.getenv("VOXY_TRANS_NEAR_CULL_FULLRING"));
+    private static boolean loggedNearCullRuntime;
 
     private static float parseEnvFloat(String name, float def) {
         String v = System.getenv(name);
@@ -389,6 +408,18 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 }
                 opaqueDefines.put("VOXY_FORCE_OPAQUE_ALPHA", "");
 
+                // 2026-07-16 round-15 pane probe: orange-tint in-ring OPAQUE-layer
+                // LOD fragments (see quads.frag). The pale border panes evaded every
+                // translucent-resolve/abyss tint; this classifies whether they are
+                // opaque-layer LOD content in one run. Probe only — no behavior
+                // without the env.
+                if ("1".equals(System.getenv("VOXY_OPAQUE_RING_DEBUG"))) {
+                    opaqueDefines.put("VOXY_OPAQUE_RING_DEBUG", "");
+                    Logger.info("[Metal-LODTEST] opaque ring debug ARMED (in-ring opaque-layer"
+                            + " LOD fragments tint ORANGE; panes orange = they are opaque-layer"
+                            + " LOD content, outside every water/abyss path probed so far)");
+                }
+
                 // VOXY_LOD_FIXED_MIP — sample atlas at LOD 0 instead of the
                 //   derivative-based mip. DEFAULT ON for Metal (2026-06-09): the
                 //   dFdx/dFdy-based mip collapses to the smallest mip on Metal,
@@ -504,12 +535,64 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                             translucentDefines.put("VOXY_TRANS_NEAR_CULL_RADIAL", "");
                         }
                     }
+                    // 2026-07-04: gate the cull on chunk-bound mask coverage so
+                    // LOD water survives over UNBUILT sections inside the ring
+                    // (naked-seafloor "gray squares" fix — see quads.frag).
+                    // VOXY_TRANS_NEAR_CULL_MASKED=0 restores the unconditional cull.
+                    if (TRANS_NEAR_CULL_MASKED_ON) {
+                        translucentDefines.put("VOXY_TRANS_NEAR_CULL_MASKED", "");
+                        Logger.info("[Metal-LODTEST] trans near-cull MASKED (cull only under built-"
+                                + "section coverage; LOD water kept over unbuilt sections); "
+                                + "VOXY_TRANS_NEAR_CULL_MASKED=0 reverts");
+                        // 2026-07-14: masked-culled LOD water keeps a depth-only
+                        // "ghost" write so the trans depth bridge carries the water
+                        // surface (dT < d) and the seafloor water-column dim reaches
+                        // LOD floors under REAL MC water (the near pale patches —
+                        // the plain discard erased the depth too, so dT==d made the
+                        // dim structurally unreachable at exactly those pixels).
+                        // VOXY_TRANS_NEAR_CULL_GHOST=0 reverts to the plain discard.
+                        if (!"0".equals(System.getenv("VOXY_TRANS_NEAR_CULL_GHOST"))) {
+                            translucentDefines.put("VOXY_TRANS_NEAR_CULL_GHOST", "");
+                            Logger.info("[Metal-LODTEST] trans near-cull GHOST depth ON "
+                                    + "(culled LOD water keeps its depth write; floors under "
+                                    + "real MC water get the seafloor dim); "
+                                    + "VOXY_TRANS_NEAR_CULL_GHOST=0 reverts");
+                        }
+                    }
                     Logger.info("[Metal-LODTEST] translucent near-cull ON (vx contract: no LOD water "
                             + "inside MC render distance; metric="
                             + (TRANS_NEAR_CULL_RADIAL ? "xz-radial" : TRANS_NEAR_CULL_XZ ? "xz-chebyshev" : "3d-slant")
                             + ", margin=" + TRANS_NEAR_CULL_MARGIN + "); VOXY_TRANS_NEAR_CULL=0 disables, "
                             + "VOXY_TRANS_NEAR_CULL_RADIAL=0 restores the Chebyshev square, "
                             + "VOXY_TRANS_NEAR_CULL_XZ=0 restores the slant metric");
+                }
+                // VOXY_WLOG_TINT_FIX — the pale plant-field squares (2026-07-04,
+                //   issue 2). Waterlogged plant models (seagrass/kelp) inherit
+                //   the water model's biome-LUT flag (ModelFactory keeps it so
+                //   the mesher preserves per-voxel biome bits) but bake no
+                //   colour provider, leaving the uint(-1) sentinel in the
+                //   colour slot; the vertex-side LUT fetch colourData[-1+biome]
+                //   wraps unsigned into another model's entry (pale water blue)
+                //   and tints every plant-field quad of the DOUBLE-SIDED opaque
+                //   batch — which has no near-cull, so the quads shine through
+                //   INSIDE MC render distance wherever the fail-open chunk-bound
+                //   mask misses. Guard the sentinel shader-side (Metal-injected
+                //   define; GL source unchanged). VOXY_WLOG_TINT_FIX=0 reverts;
+                //   VOXY_DEBUG_WLOG_TINT=1 paints affected quads magenta for
+                //   one-screenshot adjudication.
+                String wlogFixEnv = System.getenv("VOXY_WLOG_TINT_FIX");
+                if (wlogFixEnv == null || !"0".equals(wlogFixEnv.trim())) {
+                    opaqueDefines.put("VOXY_WLOG_TINT_FIX", "");
+                    translucentDefines.put("VOXY_WLOG_TINT_FIX", "");
+                    Logger.info("[Metal-LODTEST] waterlogged-plant tint sentinel guard ON "
+                            + "(biome-LUT flag + colour=-1 no longer wraps into another model's "
+                            + "tint); VOXY_WLOG_TINT_FIX=0 reverts");
+                }
+                if ("1".equals(System.getenv("VOXY_DEBUG_WLOG_TINT"))) {
+                    opaqueDefines.put("VOXY_DEBUG_WLOG_TINT", "");
+                    translucentDefines.put("VOXY_DEBUG_WLOG_TINT", "");
+                    Logger.info("[Metal-LODTEST] wlog tint DEBUG ON — sentinel-tint quads render "
+                            + "solid magenta");
                 }
                 // Seam-ring brightness parity: GL runs SSAO between opaque and
                 // translucent; that pass is parked on Metal, so LOD terrain sits
@@ -578,6 +661,16 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 if ("1".equals(System.getenv("VOXY_LOD_WATER_DEBUG"))) {
                     translucentDefines.put("VOXY_LOD_WATER_DEBUG", "");
                     Logger.info("[Metal-LODTEST] VOXY_LOD_WATER_DEBUG: translucent LOD water = solid magenta + depth test OFF");
+                }
+                // Probe (2026-07-14): orange-tint OPAQUE-pass fragments whose
+                // model carries a water customId. The near pale water quads
+                // showed NO tint from any voxy_translucent/voxy_opaque debug
+                // arm — if they turn orange here, they are water faces meshed
+                // into the OPAQUE LOD pass (Mipper rep-selection), which the
+                // whole pack-side water path can never touch.
+                if ("1".equals(System.getenv("VOXY_LOD_OPAQUE_WATER_DEBUG"))) {
+                    opaqueDefines.put("VOXY_OPAQUE_WATER_DEBUG", "");
+                    Logger.info("[Metal-LODTEST] VOXY_LOD_OPAQUE_WATER_DEBUG: opaque-pass water-customId fragments = solid orange");
                 }
                 // Depth bias for translucent LOD water (toward the camera).
                 // DEFAULT 0 (off): testing on 2026-05-26 proved the water "holes"
@@ -876,7 +969,23 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
             // see VOXY_TRANS_NEAR_CULL). GL and no-pack sessions read 0.
             float nearCull = 0.0f;
             if (me.cortex.voxy.client.core.util.IrisUtil.vxContractActive()) {
-                nearCull = Math.max(rdBlocks - TRANS_NEAR_CULL_MARGIN, 64f);
+                // FULLRING (masked mode): radius = the full vanilla border so the
+                // mask gate is reachable in the border overlap ring — see the
+                // TRANS_NEAR_CULL_FULLRING static. MetalVxResolvePass.ringCullNow()
+                // mirrors this formula (intentionally identical).
+                nearCull = TRANS_NEAR_CULL_FULLRING
+                        ? Math.max(rdBlocks, 64f)
+                        : Math.max(rdBlocks - TRANS_NEAR_CULL_MARGIN, 64f);
+            }
+            if (!loggedNearCullRuntime) {
+                loggedNearCullRuntime = true;
+                // One-shot: getRenderDistance() units (blocks vs chunks) decide
+                // whether the cull radius is ~RD or degenerate ~64.
+                Logger.info("[Metal-LODTEST] trans near-cull runtime: rdBlocks=" + rdBlocks
+                        + " cullDist=" + nearCull + " fullRing=" + TRANS_NEAR_CULL_FULLRING
+                        + " (vxContract="
+                        + me.cortex.voxy.client.core.util.IrisUtil.vxContractActive()
+                        + "); VOXY_TRANS_NEAR_CULL_FULLRING=0 reverts to the -margin radius");
             }
             MemoryUtil.memPutFloat(lodBase + 16, nearCull);
             MemoryUtil.memPutFloat(lodBase + 20, 0f);

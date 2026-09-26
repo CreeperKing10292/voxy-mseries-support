@@ -78,8 +78,53 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
         }
     }
 
+    /** [Metal-CULL] probe: raw GL_CULL_FACE at the head of Sodium's TRANSLUCENT pass
+     *  (before Sodium's tracked applyPipelineState, which is a no-op when
+     *  GlStateManager's shadow copy already says "enabled"). Logs transitions
+     *  only, with the held-item / hideGui state, so the triad correlation is
+     *  readable straight from latest.log. VOXY_CULL_PROBE=0 disables. */
+    @Unique private static final boolean VOXY_CULL_PROBE = !"0".equals(System.getenv("VOXY_CULL_PROBE"));
+    @Unique private static int voxy$cullProbeLast = -1;
+    @Unique private static long voxy$cullProbePasses;
+    @Unique private static long voxy$cullProbeLastLogNs;
+    @Unique private static int voxy$cullProbeSuppressed;
+
+    @Unique
+    private static void voxy$cullProbe(TerrainRenderPass renderPass) {
+        if (!VOXY_CULL_PROBE || !renderPass.isTranslucent()) return;
+        if (RenderBackendFactory.get().getType() != BackendType.METAL) return;
+        // Iris's shadow pass re-enters render(TRANSLUCENT) with cull legitimately
+        // disabled (SodiumShader.setupState -> _disableCull); not the frame we probe.
+        if (IrisUtil.shadowsBeingRendered()) return;
+        boolean cull = org.lwjgl.opengl.GL11C.glIsEnabled(org.lwjgl.opengl.GL11C.GL_CULL_FACE);
+        voxy$cullProbePasses++;
+        int now = cull ? 1 : 0;
+        if (now == voxy$cullProbeLast) return;
+        voxy$cullProbeLast = now;
+        // With the leak live (VOXY_GL_CULL_RESTORE=0) a mob at the visibility
+        // edge flips this every frame: throttle to one line per second and
+        // count what was suppressed so no transition is silently lost.
+        long t = System.nanoTime();
+        if (t - voxy$cullProbeLastLogNs < 1_000_000_000L) { voxy$cullProbeSuppressed++; return; }
+        voxy$cullProbeLastLogNs = t;
+        String hand = "?";
+        boolean hideGui = false;
+        try {
+            var mc = Minecraft.getInstance();
+            hideGui = mc.options.hideGui;
+            hand = mc.player == null ? "no-player"
+                    : (mc.player.getMainHandItem().isEmpty() ? "EMPTY" : mc.player.getMainHandItem().getItem().toString());
+        } catch (Throwable ignored) {}
+        Logger.info("[Metal-CULL] translucent-pass head: GL cull=" + (cull ? "ON" : "OFF")
+                + " mainHand=" + hand + " hideGui=" + hideGui + " passes=" + voxy$cullProbePasses
+                + (voxy$cullProbeSuppressed > 0 ? " suppressedFlips=" + voxy$cullProbeSuppressed : "")
+                + (cull ? "" : "  <- back faces of water WILL rasterise this frame"));
+        voxy$cullProbeSuppressed = 0;
+    }
+
     @Unique
     private void doRender(ChunkRenderMatrices matrices, CommandList commandList, ChunkRenderListIterable renderLists, TerrainRenderPass renderPass, CameraTransform camera, FogParameters fogParameters, boolean indexedRenderingEnabled) {
+        voxy$cullProbe(renderPass);
         this.voxy$preflightSodiumSharedIndexBuffer(commandList, renderLists, renderPass, camera, indexedRenderingEnabled);
 
         if (renderPass == DefaultTerrainRenderPasses.SOLID) {
@@ -142,8 +187,14 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
                         // the proven Phase-B inject (bridge colour + vxDepthTexOpaque, untouched
                         // vs dev); ONLY the translucent (water) layer runs voxy_translucent over
                         // its material g-buffer → colortex16, so water gets real BSL shading.
+                        // 4th arg (transDepthBridge, non-null by the branch guard): the
+                        // inject's seafloor water-column dim needs the LOD trans depth to
+                        // reconstruct the water column above each opaque pixel. transBridge
+                        // stays null, so the Phase-D passthrough (which needs BOTH) stays
+                        // off and colortex16 is still written only by resolveTranslucentOnly.
                         me.cortex.voxy.client.core.util.VxContractInjector.inject(viewport,
-                                pipeline.metalBridge(), pipeline.metalDepthBridge(), null, null);
+                                pipeline.metalBridge(), pipeline.metalDepthBridge(), null,
+                                pipeline.metalDepthTransBridge());
                         var irisPipe = net.irisshaders.iris.Iris.getPipelineManager().getPipelineNullable();
                         if (irisPipe instanceof net.irisshaders.iris.pipeline.IrisRenderingPipeline irp) {
                             int tP0 = me.cortex.voxy.client.core.interop.IOSurfaceBridgeCompositor.acquireAuxRectTex(pipeline.metalVxTrans0());
