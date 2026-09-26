@@ -408,6 +408,18 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
                 }
                 opaqueDefines.put("VOXY_FORCE_OPAQUE_ALPHA", "");
 
+                // 2026-07-16 round-15 pane probe: orange-tint in-ring OPAQUE-layer
+                // LOD fragments (see quads.frag). The pale border panes evaded every
+                // translucent-resolve/abyss tint; this classifies whether they are
+                // opaque-layer LOD content in one run. Probe only — no behavior
+                // without the env.
+                if ("1".equals(System.getenv("VOXY_OPAQUE_RING_DEBUG"))) {
+                    opaqueDefines.put("VOXY_OPAQUE_RING_DEBUG", "");
+                    Logger.info("[Metal-LODTEST] opaque ring debug ARMED (in-ring opaque-layer"
+                            + " LOD fragments tint ORANGE; panes orange = they are opaque-layer"
+                            + " LOD content, outside every water/abyss path probed so far)");
+                }
+
                 // VOXY_LOD_FIXED_MIP — sample atlas at LOD 0 instead of the
                 //   derivative-based mip. DEFAULT ON for Metal (2026-06-09): the
                 //   dFdx/dFdy-based mip collapses to the smallest mip on Metal,

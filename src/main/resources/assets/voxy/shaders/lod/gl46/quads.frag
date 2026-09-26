@@ -521,6 +521,22 @@ void main() {
     #endif
 #endif
 
+#if !defined(TRANSLUCENT) && defined(VOXY_OPAQUE_RING_DEBUG) && defined(VOXY_NEEDS_FOG_DIST)
+    // 2026-07-16 round-15 probe (env VOXY_OPAQUE_RING_DEBUG=1, inert
+    // otherwise): orange-tint every OPAQUE-layer LOD fragment inside the
+    // trans near-cull ring. The pale border panes took no tint from any
+    // translucent-resolve or abyss probe (those paths never touch the
+    // opaque layer, and the earlier "opaque" probes lived in dead
+    // PATCHED-only / voxy_opaque-resolve branches). If the panes are
+    // opaque-layer LOD content showing through unbuilt Sodium holes, they
+    // read solid orange in one screenshot. voxyLodParams2.x is the same
+    // LIVE cull-ring uniform the translucent near-cull uses (> 0 exactly
+    // under the vx contract).
+    if (voxyLodParams2.x > 0.0 && voxyFogDist < voxyLodParams2.x) {
+        outColour.rgb = mix(outColour.rgb, vec3(1.0, 0.45, 0.0), 0.65);
+    }
+#endif
+
     // M13 chunk 5: environmental fog on the Metal terrain path. Mirrors the
     // GL post-pass formula from blit_texture_depth_cutout.frag (lines 71–74)
     // so distant LOD chunks fade into the sky/biome fog colour the same way

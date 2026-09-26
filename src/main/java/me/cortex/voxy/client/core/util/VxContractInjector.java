@@ -252,6 +252,11 @@ public final class VxContractInjector {
     /** Diagnostic (house style): paint the fill bright green so "fill covers
      *  the panes" vs "fill never engages" is unmistakable on a screenshot. */
     private static final boolean VX_ABYSS_DEBUG = "1".equals(System.getenv("VOXY_VX_ABYSS_DEBUG"));
+    /** Round-19 probe: tint EVERYTHING the injector writes (trans passthrough
+     *  RED, opaque inject ORANGE) with no radius gates — the two colour paths
+     *  earlier probes either never tinted or tinted with a ring-radius hole
+     *  exactly over the 480-512 border band where the panes live. */
+    private static final boolean VX_INJECT_DEBUG = "1".equals(System.getenv("VOXY_VX_INJECT_DEBUG"));
     private static final float[] VX_ABYSS_RGB = parseEnvRgb("VOXY_VX_ABYSS_RGB", 0.010f, 0.024f, 0.032f);
     /** 2026-07-16 round-14 pane fix: the abyss pair's down-angle gate (-0.05,
      *  ~2.9 deg below horizontal) refused exactly the grazing rays where the
@@ -838,6 +843,17 @@ public final class VxContractInjector {
                     outColor0 = vec4(enc * c.a, c.a);
                 }
                 """;
+        if (VX_INJECT_DEBUG) {
+            // 2026-07-17 round-19 probe: solid RED on everything the trans
+            // passthrough writes into colortex16 — the ONE colour path no
+            // earlier probe ever tinted (the resolve tints never touched it,
+            // and the round-15 orange probe was gated to < ring radius while
+            // the panes sit at the 480-512 border band).
+            fs = fs.replace("outColor0 = vec4(enc * c.a, c.a);",
+                    "outColor0 = vec4(vec3(1.0, 0.0, 0.0) * c.a, c.a);");
+            Logger.info("[Metal-LODTEST] vx INJECT DEBUG: trans passthrough tint RED armed"
+                    + " (everything this pass writes to colortex16 reads red)");
+        }
         transProgram = VxIrisSideChannel.compile(vs, fs, "VxContractInjector.trans");
         if (transProgram == 0) return false;
         uTransColour = glGetUniformLocation(transProgram, "uColour");
@@ -1411,6 +1427,18 @@ public final class VxContractInjector {
                 + (VX_LOD_SHADOW_V2 ? fsMarchV2 : fsMarchV1) + fsTail;
         fs = fs.replace("__SF_FADE_START__",
                 VX_SEAFLOOR_FADE_V2 ? "uSeafloorMaxDist * 0.95" : "uSeafloorMaxDist - 96.0");
+        if (VX_INJECT_DEBUG) {
+            // 2026-07-17 round-19 probe: solid ORANGE on everything the opaque
+            // inject writes into colortex0 — unlike the round-15 quads.frag
+            // probe this has NO ring-radius gate, so the 480-512 border band
+            // (where the panes live) is covered too.
+            fs = fs.replace(
+                    "outColor0 = vec4((uInjectSqrt == 1) ? sqrt(max(lin, vec3(0.0))) : lin, 1.0);",
+                    "outColor0 = vec4(1.0, 0.5, 0.0, 1.0);");
+            Logger.info("[Metal-LODTEST] vx INJECT DEBUG: opaque inject tint ORANGE armed"
+                    + " (everything this pass writes to colortex0 reads solid orange,"
+                    + " no radius gate)");
+        }
         Logger.info("[Metal-LODTEST] vx seafloor fade " + (VX_SEAFLOOR_FADE_V2
                 ? "V2 ON (interior fade 0.95*maxDist..maxDist, aligned with the water ring"
                   + " parity ramp so the floor stays dimmed through the 471..496 fallback band;"

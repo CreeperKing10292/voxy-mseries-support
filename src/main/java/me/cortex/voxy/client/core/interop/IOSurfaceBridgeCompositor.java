@@ -652,7 +652,7 @@ public final class IOSurfaceBridgeCompositor {
         // vanilla MVP, and clamp below 1.0 (MAX_DEPTH backs off ~2 ulp of a
         // 24-bit depth buffer) so LOD pixels never alias with the pack's
         // sky-at-1.0 test in deferred/composite passes.
-        int fs = compileShader(GL_FRAGMENT_SHADER, """
+        String gbFsSrc = """
                 #version 150 core
                 uniform sampler2DRect uColor;
                 uniform sampler2DRect uDepth;
@@ -720,7 +720,20 @@ public final class IOSurfaceBridgeCompositor {
                     c.rgb = (uInjectSqrt == 1) ? sqrt(max(lin, vec3(0.0))) : lin;
                     fragColor = c;
                 }
-                """);
+                """;
+        if ("1".equals(System.getenv("VOXY_VX_INJECT_DEBUG"))) {
+            // 2026-07-17 round-19b probe: MAGENTA on everything the compositor's
+            // Iris-gbuffer inject writes (colour + depth into Iris's SOLID
+            // framebuffer) — the THIRD colour writer, missed by the round-19
+            // tints which only covered VxContractInjector's two programs.
+            // Depth/discard semantics unchanged; colour only.
+            gbFsSrc = gbFsSrc.replace("fragColor = c;",
+                    "fragColor = vec4(1.0, 0.0, 1.0, c.a);");
+            me.cortex.voxy.common.Logger.info("[Metal-LODTEST] vx INJECT DEBUG: gbuffer"
+                    + " inject tint MAGENTA armed (everything the compositor writes into"
+                    + " Iris's solid gbuffer reads magenta, depth semantics unchanged)");
+        }
+        int fs = compileShader(GL_FRAGMENT_SHADER, gbFsSrc);
         if (vs == 0 || fs == 0) {
             if (vs != 0) glDeleteShader(vs);
             if (fs != 0) glDeleteShader(fs);
