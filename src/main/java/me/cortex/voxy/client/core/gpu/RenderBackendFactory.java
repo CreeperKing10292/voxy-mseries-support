@@ -51,9 +51,26 @@ public final class RenderBackendFactory {
     }
 
     private static boolean shouldUseMetal() {
-        String os = System.getProperty("os.name", "").toLowerCase();
-        String arch = System.getProperty("os.arch", "").toLowerCase();
-        // Apple Silicon Macs: macOS + aarch64
-        return os.contains("mac") && arch.contains("aarch64");
+    String os = System.getProperty("os.name", "").toLowerCase();
+    String arch = System.getProperty("os.arch", "").toLowerCase();
+
+    boolean forceMetal =
+            "1".equals(System.getenv("VOXY_FORCE_METAL"))
+            || "true".equalsIgnoreCase(System.getenv("VOXY_FORCE_METAL"))
+            || "true".equalsIgnoreCase(System.getProperty("voxy.forceMetal", "false"));
+
+    Logger.info("[Metal probe] os.name=" + os
+            + ", os.arch=" + arch
+            + ", VOXY_FORCE_METAL=" + System.getenv("VOXY_FORCE_METAL")
+            + ", forceMetal=" + forceMetal);
+
+    // Explicit override for experimental iPadOS/Amethyst testing.
+    if (forceMetal) {
+        Logger.info("[VOXY_FORCE_METAL] Forcing Metal backend selection");
+        return true;
     }
+
+    // Normal upstream behaviour: Apple Silicon macOS only.
+    return os.contains("mac") && arch.contains("aarch64");
+}
 }
