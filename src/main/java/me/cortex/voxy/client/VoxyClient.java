@@ -30,7 +30,10 @@ public class VoxyClient implements ClientModInitializer {
     private static final HashSet<String> FREX = new HashSet<>();
 
     public static void initVoxyClient() {
+        Logger.info("[IPAD TEST] entered modified VoxyClient.initVoxyClient");
         Capabilities.init();//Ensure clinit is called
+        Logger.info("[IPAD TEST] Capabilities.init finished");
+        Logger.info("[IPAD TEST] about to call RenderBackendFactory.get()");
 
         if (Capabilities.INSTANCE.hasBrokenDepthSampler) {
             Logger.error("AMD broken depth sampler detected, voxy does not work correctly and has been disabled, this will hopefully be fixed in the future");
